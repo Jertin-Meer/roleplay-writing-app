@@ -7,6 +7,8 @@ interface Props {
   isMyTurn: boolean;
   myCharacters: Character[];
   onSubmit: (content: string, postType: PostType, character?: Character) => Promise<void>;
+  onEndTurn: () => Promise<void>;
+  onTypingChange: (content: string, postType: PostType, characterName?: string) => void;
 }
 
 const POST_TYPES: { type: PostType; label: string }[] = [
@@ -16,36 +18,57 @@ const POST_TYPES: { type: PostType; label: string }[] = [
   { type: 'system', label: '备注' },
 ];
 
-export default function WritingComposer({ isMyTurn, myCharacters, onSubmit }: Props) {
+export default function WritingComposer({
+  isMyTurn,
+  myCharacters,
+  onSubmit,
+  onEndTurn,
+  onTypingChange,
+}: Props) {
   const [postType, setPostType] = useState<PostType>('narration');
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   const [content, setContent] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [endingTurn, setEndingTurn] = useState(false);
   const [error, setError] = useState('');
 
   const needsCharacter = postType === 'dialogue' || postType === 'action';
   const selectedCharacter = myCharacters.find((c) => c.id === selectedCharacterId);
 
+  const broadcast = (text: string, type: PostType, charName?: string) => {
+    if (isMyTurn) onTypingChange(text, type, charName);
+  };
+
+  const handleContentChange = (value: string) => {
+    setContent(value);
+    broadcast(value, postType, needsCharacter ? selectedCharacter?.character_name : undefined);
+  };
+
+  const handleTypeChange = (type: PostType) => {
+    setPostType(type);
+    setError('');
+    const charName = (type === 'dialogue' || type === 'action') ? selectedCharacter?.character_name : undefined;
+    broadcast(content, type, charName);
+  };
+
+  const handleCharChange = (id: string) => {
+    setSelectedCharacterId(id);
+    const char = myCharacters.find((c) => c.id === id);
+    broadcast(content, postType, char?.character_name);
+  };
+
   const handleSubmit = async () => {
     if (!isMyTurn) return;
-    if (!content.trim()) {
-      setError('内容不能为空');
-      return;
-    }
-    if (needsCharacter && !selectedCharacterId) {
-      setError('请先选择一个角色');
-      return;
-    }
-    if (needsCharacter && myCharacters.length === 0) {
-      setError('请先在左侧创建一个角色');
-      return;
-    }
+    if (!content.trim()) { setError('内容不能为空'); return; }
+    if (needsCharacter && myCharacters.length === 0) { setError('请先在左侧创建一个角色'); return; }
+    if (needsCharacter && !selectedCharacterId) { setError('请先选择一个角色'); return; }
 
     setError('');
     setSubmitting(true);
     try {
       await onSubmit(content.trim(), postType, selectedCharacter);
       setContent('');
+      onTypingChange('', postType); // 清除预览
     } catch {
       setError('提交失败，请重试');
     } finally {
@@ -53,14 +76,27 @@ export default function WritingComposer({ isMyTurn, myCharacters, onSubmit }: Pr
     }
   };
 
+  const handleEndTurn = async () => {
+    setEndingTurn(true);
+    onTypingChange('', postType); // 结束前清除预览
+    try {
+      await onEndTurn();
+      setContent('');
+      setPostType('narration');
+      setSelectedCharacterId('');
+    } finally {
+      setEndingTurn(false);
+    }
+  };
+
   return (
     <div className="border-t border-gray-200 bg-white p-4 space-y-3 shrink-0">
-      {/* Type selector */}
+      {/* 类型选择 */}
       <div className="flex gap-2 flex-wrap">
         {POST_TYPES.map(({ type, label }) => (
           <button
             key={type}
-            onClick={() => { setPostType(type); setError(''); }}
+            onClick={() => handleTypeChange(type)}
             disabled={!isMyTurn}
             className={`px-3 py-1 text-sm rounded border transition-colors ${
               postType === type
@@ -73,47 +109,57 @@ export default function WritingComposer({ isMyTurn, myCharacters, onSubmit }: Pr
         ))}
       </div>
 
-      {/* Character selector */}
+      {/* 角色选择 */}
       {needsCharacter && (
-        <div>
-          {myCharacters.length === 0 ? (
-            <p className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded">
-              请先在左侧角色面板创建一个角色
-            </p>
-          ) : (
-            <select
-              value={selectedCharacterId}
-              onChange={(e) => setSelectedCharacterId(e.target.value)}
-              disabled={!isMyTurn}
-              className="w-full py-1.5 px-2 text-sm border border-gray-200 rounded bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-gray-400 disabled:opacity-40"
-            >
-              <option value="">选择角色...</option>
-              {myCharacters.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.character_name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
+        myCharacters.length === 0 ? (
+          <p className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded">
+            请先在左侧角色面板创建一个角色
+          </p>
+        ) : (
+          <select
+            value={selectedCharacterId}
+            onChange={(e) => handleCharChange(e.target.value)}
+            disabled={!isMyTurn}
+            className="w-full py-1.5 px-2 text-sm border border-gray-200 rounded bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-gray-400 disabled:opacity-40"
+          >
+            <option value="">选择角色...</option>
+            {myCharacters.map((c) => (
+              <option key={c.id} value={c.id}>{c.character_name}</option>
+            ))}
+          </select>
+        )
       )}
 
-      {/* Content textarea */}
+      {/* 输入框 */}
       <textarea
         value={content}
-        onChange={(e) => setContent(e.target.value)}
+        onChange={(e) => handleContentChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit();
         }}
         disabled={!isMyTurn}
-        placeholder={isMyTurn ? '写点什么... (Ctrl+Enter 提交)' : '等待对方写作中...'}
+        placeholder={isMyTurn ? '写点什么... (Ctrl+Enter 提交单条)' : '等待对方写作中...'}
         rows={4}
         className="w-full py-2 px-3 border border-gray-200 rounded text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-400 resize-none disabled:bg-gray-50 disabled:opacity-60"
       />
 
       {error && <p className="text-xs text-red-500">{error}</p>}
 
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-2">
+        {/* 结束回合 */}
+        {isMyTurn ? (
+          <button
+            onClick={handleEndTurn}
+            disabled={endingTurn}
+            className="text-sm px-4 py-2 border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-40 transition-colors"
+          >
+            {endingTurn ? '结束中...' : '结束回合 →'}
+          </button>
+        ) : (
+          <div />
+        )}
+
+        {/* 提交单条 */}
         <button
           onClick={handleSubmit}
           disabled={!isMyTurn || submitting || !content.trim()}

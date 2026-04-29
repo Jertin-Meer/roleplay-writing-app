@@ -11,7 +11,7 @@ import MemberList from '@/components/MemberList';
 import CharacterPanel from '@/components/CharacterPanel';
 import TurnBanner from '@/components/TurnBanner';
 import WritingComposer from '@/components/WritingComposer';
-import PostList from '@/components/PostList';
+import PostList, { type TypingPreview } from '@/components/PostList';
 import ArticlePreview from '@/components/ArticlePreview';
 
 type Tab = 'writing' | 'preview' | 'members';
@@ -21,26 +21,30 @@ export default function RoomPage() {
   const router = useRouter();
   const roomId = params.roomId as string;
 
-  // Player identity
   const [playerId, setPlayerId] = useState('');
   const [nickname, setNickname] = useState('');
   const [showNicknameModal, setShowNicknameModal] = useState(false);
 
-  // Room data
   const [room, setRoom] = useState<Room | null>(null);
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [myMember, setMyMember] = useState<RoomMember | null>(null);
+  const [typingPreview, setTypingPreview] = useState<TypingPreview | null>(null);
 
-  // UI state
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('writing');
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const myMemberRef = useRef<RoomMember | null>(null);
+  myMemberRef.current = myMember;
 
-  // Step 1: on mount, get player identity
+  // 当回合切换时，清除打字预览
+  useEffect(() => {
+    setTypingPreview(null);
+  }, [room?.current_turn_member_id]);
+
   useEffect(() => {
     const pid = getOrCreatePlayerId();
     setPlayerId(pid);
@@ -58,7 +62,6 @@ export default function RoomPage() {
     setShowNicknameModal(false);
   };
 
-  // Step 2: once we have playerId + nickname, load room and subscribe
   useEffect(() => {
     if (!playerId || !nickname) return;
 
@@ -67,7 +70,6 @@ export default function RoomPage() {
     const init = async () => {
       setLoading(true);
 
-      // Load room
       const { data: roomData, error: roomErr } = await supabase
         .from('rooms')
         .select('*')
@@ -82,7 +84,6 @@ export default function RoomPage() {
 
       setRoom(roomData);
 
-      // Load members
       const { data: membersData } = await supabase
         .from('room_members')
         .select('*')
@@ -92,7 +93,6 @@ export default function RoomPage() {
       const existingMembers: RoomMember[] = membersData || [];
       setMembers(existingMembers);
 
-      // Join room (upsert)
       const alreadyIn = existingMembers.find((m) => m.player_id === playerId);
       let me: RoomMember | null = alreadyIn || null;
 
@@ -120,7 +120,6 @@ export default function RoomPage() {
 
       setMyMember(me);
 
-      // Set initial turn if none
       if (me && !roomData.current_turn_member_id) {
         const allMembers = alreadyIn
           ? existingMembers
@@ -135,28 +134,26 @@ export default function RoomPage() {
         }
       }
 
-      // Load characters
       const { data: charsData } = await supabase
         .from('characters')
         .select('*')
         .eq('room_id', roomId)
         .order('created_at', { ascending: true });
-
       setCharacters(charsData || []);
 
-      // Load posts
       const { data: postsData } = await supabase
         .from('posts')
         .select('*')
         .eq('room_id', roomId)
         .order('order_index', { ascending: true });
-
       setPosts(postsData || []);
+
       setLoading(false);
 
-      // Realtime subscriptions
+      // ── Realtime ──────────────────────────────────────────
       channel = supabase
         .channel(`room-${roomId}`)
+        // 新帖子
         .on(
           'postgres_changes',
           { event: 'INSERT', schema: 'public', table: 'posts', filter: `room_id=eq.${roomId}` },
@@ -167,6 +164,7 @@ export default function RoomPage() {
             });
           }
         )
+        // 成员变化
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` },
@@ -184,6 +182,7 @@ export default function RoomPage() {
               });
           }
         )
+        // 角色变化
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'characters', filter: `room_id=eq.${roomId}` },
@@ -198,6 +197,7 @@ export default function RoomPage() {
               });
           }
         )
+        // 房间更新（回合切换）
         .on(
           'postgres_changes',
           { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
@@ -205,6 +205,16 @@ export default function RoomPage() {
             setRoom(payload.new as Room);
           }
         )
+        // 实时打字预览广播
+        .on('broadcast', { event: 'typing' }, (payload) => {
+          const data = payload.payload as TypingPreview & { content: string };
+          if (data.memberId === myMemberRef.current?.id) return; // 忽略自己
+          if (!data.content) {
+            setTypingPreview(null);
+          } else {
+            setTypingPreview(data);
+          }
+        })
         .subscribe();
 
       channelRef.current = channel;
@@ -218,12 +228,12 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerId, nickname, roomId]);
 
+  // 提交单条内容（不再自动换回合）
   const handlePostSubmit = useCallback(
     async (content: string, postType: PostType, character?: Character) => {
       if (!myMember || !room) return;
       if (room.current_turn_member_id !== myMember.id) return;
 
-      // Get max order_index
       const { data: lastPost } = await supabase
         .from('posts')
         .select('order_index')
@@ -246,20 +256,45 @@ export default function RoomPage() {
       });
 
       if (postErr) throw postErr;
-
-      // Advance turn
-      const sorted = [...members].sort((a, b) => a.turn_order - b.turn_order);
-      const idx = sorted.findIndex((m) => m.id === myMember.id);
-      const next = sorted[(idx + 1) % sorted.length];
-
-      if (next) {
-        await supabase
-          .from('rooms')
-          .update({ current_turn_member_id: next.id, updated_at: new Date().toISOString() })
-          .eq('id', roomId);
-      }
+      // 不自动换回合，等用户点「结束回合」
     },
-    [myMember, room, members, roomId]
+    [myMember, room, roomId]
+  );
+
+  // 手动结束回合 → 切换到下一位
+  const handleEndTurn = useCallback(async () => {
+    if (!myMember || !room) return;
+    if (room.current_turn_member_id !== myMember.id) return;
+
+    const sorted = [...members].sort((a, b) => a.turn_order - b.turn_order);
+    const idx = sorted.findIndex((m) => m.id === myMember.id);
+    const next = sorted[(idx + 1) % sorted.length];
+
+    if (next) {
+      await supabase
+        .from('rooms')
+        .update({ current_turn_member_id: next.id, updated_at: new Date().toISOString() })
+        .eq('id', roomId);
+    }
+  }, [myMember, room, members, roomId]);
+
+  // 实时打字广播
+  const handleTypingChange = useCallback(
+    (content: string, postType: PostType, characterName?: string) => {
+      if (!channelRef.current || !myMember) return;
+      channelRef.current.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: {
+          memberId: myMember.id,
+          nickname: myMember.nickname,
+          content,
+          postType,
+          characterName,
+        },
+      });
+    },
+    [myMember]
   );
 
   const handleSkipTurn = useCallback(async () => {
@@ -298,9 +333,7 @@ export default function RoomPage() {
 
   // ─── Render ───────────────────────────────────
 
-  if (showNicknameModal) {
-    return <NicknameModal onSubmit={handleNicknameSet} />;
-  }
+  if (showNicknameModal) return <NicknameModal onSubmit={handleNicknameSet} />;
 
   if (loading) {
     return (
@@ -342,9 +375,7 @@ export default function RoomPage() {
             key={tab}
             onClick={() => setActiveTab(tab)}
             className={`flex-1 py-2 text-sm font-medium transition-colors ${
-              activeTab === tab
-                ? 'border-b-2 border-gray-900 text-gray-900'
-                : 'text-gray-500'
+              activeTab === tab ? 'border-b-2 border-gray-900 text-gray-900' : 'text-gray-500'
             }`}
           >
             {tab === 'writing' ? '写作' : tab === 'preview' ? '预览' : '成员'}
@@ -353,7 +384,7 @@ export default function RoomPage() {
       </div>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left sidebar — Members & Characters */}
+        {/* Left sidebar */}
         <aside
           className={`${
             activeTab === 'members' ? 'flex' : 'hidden'
@@ -372,9 +403,7 @@ export default function RoomPage() {
           />
           {isHost && (
             <div className="p-4 border-t border-gray-100 space-y-2 mt-auto">
-              <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
-                Host 控制
-              </p>
+              <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Host 控制</p>
               <button
                 onClick={handleSkipTurn}
                 className="w-full text-sm py-1.5 px-3 border border-gray-200 text-gray-600 rounded hover:bg-gray-50 transition-colors"
@@ -391,22 +420,28 @@ export default function RoomPage() {
           )}
         </aside>
 
-        {/* Center — Posts + Composer */}
+        {/* Center */}
         <div
           className={`${
             activeTab === 'writing' ? 'flex' : 'hidden'
           } lg:flex flex-col flex-1 overflow-hidden`}
         >
           <TurnBanner isMyTurn={isMyTurn} currentTurnMember={currentTurnMember} />
-          <PostList posts={posts} />
+          <PostList
+            posts={posts}
+            typingPreview={typingPreview}
+            myMemberId={myMember?.id}
+          />
           <WritingComposer
             isMyTurn={isMyTurn}
             myCharacters={myCharacters}
             onSubmit={handlePostSubmit}
+            onEndTurn={handleEndTurn}
+            onTypingChange={handleTypingChange}
           />
         </div>
 
-        {/* Right sidebar — Article Preview */}
+        {/* Right sidebar */}
         <aside
           className={`${
             activeTab === 'preview' ? 'flex' : 'hidden'
