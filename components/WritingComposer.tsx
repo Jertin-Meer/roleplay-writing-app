@@ -5,7 +5,9 @@ import type { Character, PostType } from '@/lib/types';
 
 interface Props {
   isMyTurn: boolean;
-  myCharacters: Character[];
+  isFreeForAll: boolean;
+  availableCharacters: Character[];
+  myPlayerId: string;
   onSubmit: (content: string, postType: PostType, character?: Character) => Promise<void>;
   onEndTurn: () => Promise<void>;
   onTypingChange: (content: string, postType: PostType, characterName?: string) => void;
@@ -20,7 +22,9 @@ const POST_TYPES: { type: PostType; label: string }[] = [
 
 export default function WritingComposer({
   isMyTurn,
-  myCharacters,
+  isFreeForAll,
+  availableCharacters,
+  myPlayerId,
   onSubmit,
   onEndTurn,
   onTypingChange,
@@ -32,11 +36,12 @@ export default function WritingComposer({
   const [endingTurn, setEndingTurn] = useState(false);
   const [error, setError] = useState('');
 
+  const canWrite = isFreeForAll || isMyTurn;
   const needsCharacter = postType === 'dialogue' || postType === 'action';
-  const selectedCharacter = myCharacters.find((c) => c.id === selectedCharacterId);
+  const selectedCharacter = availableCharacters.find((c) => c.id === selectedCharacterId);
 
   const broadcast = (text: string, type: PostType, charName?: string) => {
-    if (isMyTurn) onTypingChange(text, type, charName);
+    if (canWrite) onTypingChange(text, type, charName);
   };
 
   const handleContentChange = (value: string) => {
@@ -53,14 +58,14 @@ export default function WritingComposer({
 
   const handleCharChange = (id: string) => {
     setSelectedCharacterId(id);
-    const char = myCharacters.find((c) => c.id === id);
+    const char = availableCharacters.find((c) => c.id === id);
     broadcast(content, postType, char?.character_name);
   };
 
   const handleSubmit = async () => {
-    if (!isMyTurn) return;
+    if (!canWrite) return;
     if (!content.trim()) { setError('内容不能为空'); return; }
-    if (needsCharacter && myCharacters.length === 0) { setError('请先在左侧创建一个角色'); return; }
+    if (needsCharacter && availableCharacters.length === 0) { setError('请先在左侧创建一个角色'); return; }
     if (needsCharacter && !selectedCharacterId) { setError('请先选择一个角色'); return; }
 
     setError('');
@@ -68,7 +73,7 @@ export default function WritingComposer({
     try {
       await onSubmit(content.trim(), postType, selectedCharacter);
       setContent('');
-      onTypingChange('', postType); // 清除预览
+      onTypingChange('', postType);
     } catch {
       setError('提交失败，请重试');
     } finally {
@@ -78,7 +83,7 @@ export default function WritingComposer({
 
   const handleEndTurn = async () => {
     setEndingTurn(true);
-    onTypingChange('', postType); // 结束前清除预览
+    onTypingChange('', postType);
     try {
       await onEndTurn();
       setContent('');
@@ -89,6 +94,10 @@ export default function WritingComposer({
     }
   };
 
+  // 区分自己的角色和他人角色
+  const myChars = availableCharacters.filter((c) => c.owner_player_id === myPlayerId);
+  const othersChars = availableCharacters.filter((c) => c.owner_player_id !== myPlayerId);
+
   return (
     <div className="border-t border-gray-200 bg-white p-4 space-y-3 shrink-0">
       {/* 类型选择 */}
@@ -97,7 +106,7 @@ export default function WritingComposer({
           <button
             key={type}
             onClick={() => handleTypeChange(type)}
-            disabled={!isMyTurn}
+            disabled={!canWrite}
             className={`px-3 py-1 text-sm rounded border transition-colors ${
               postType === type
                 ? 'bg-gray-900 text-white border-gray-900'
@@ -111,7 +120,7 @@ export default function WritingComposer({
 
       {/* 角色选择 */}
       {needsCharacter && (
-        myCharacters.length === 0 ? (
+        availableCharacters.length === 0 ? (
           <p className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded">
             请先在左侧角色面板创建一个角色
           </p>
@@ -119,13 +128,20 @@ export default function WritingComposer({
           <select
             value={selectedCharacterId}
             onChange={(e) => handleCharChange(e.target.value)}
-            disabled={!isMyTurn}
+            disabled={!canWrite}
             className="w-full py-1.5 px-2 text-sm border border-gray-200 rounded bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-gray-400 disabled:opacity-40"
           >
             <option value="">选择角色...</option>
-            {myCharacters.map((c) => (
-              <option key={c.id} value={c.id}>{c.character_name}</option>
-            ))}
+            {myChars.length > 0 && (
+              <optgroup label="我的角色">
+                {myChars.map((c) => <option key={c.id} value={c.id}>{c.character_name}</option>)}
+              </optgroup>
+            )}
+            {othersChars.length > 0 && (
+              <optgroup label="其他人的角色">
+                {othersChars.map((c) => <option key={c.id} value={c.id}>{c.character_name}</option>)}
+              </optgroup>
+            )}
           </select>
         )
       )}
@@ -134,11 +150,9 @@ export default function WritingComposer({
       <textarea
         value={content}
         onChange={(e) => handleContentChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit();
-        }}
-        disabled={!isMyTurn}
-        placeholder={isMyTurn ? '写点什么... (Ctrl+Enter 提交单条)' : '等待对方写作中...'}
+        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit(); }}
+        disabled={!canWrite}
+        placeholder={canWrite ? '写点什么... (Ctrl+Enter 提交)' : '等待对方写作中...'}
         rows={4}
         className="w-full py-2 px-3 border border-gray-200 rounded text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-400 resize-none disabled:bg-gray-50 disabled:opacity-60"
       />
@@ -146,8 +160,8 @@ export default function WritingComposer({
       {error && <p className="text-xs text-red-500">{error}</p>}
 
       <div className="flex items-center justify-between gap-2">
-        {/* 结束回合 */}
-        {isMyTurn ? (
+        {/* 结束回合（自由模式下不显示） */}
+        {!isFreeForAll && canWrite ? (
           <button
             onClick={handleEndTurn}
             disabled={endingTurn}
@@ -159,10 +173,9 @@ export default function WritingComposer({
           <div />
         )}
 
-        {/* 提交单条 */}
         <button
           onClick={handleSubmit}
-          disabled={!isMyTurn || submitting || !content.trim()}
+          disabled={!canWrite || submitting || !content.trim()}
           className="px-5 py-2 bg-gray-900 text-white text-sm font-medium rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {submitting ? '提交中...' : '提交'}

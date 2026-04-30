@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { generateRoomCode } from '@/lib/room';
-import { getOrCreatePlayerId, getNickname, saveNickname } from '@/lib/player';
+import { getOrCreatePlayerId, getNickname, saveNickname, getRecentRooms } from '@/lib/player';
+import type { RecentRoom } from '@/lib/types';
 import NicknameModal from '@/components/NicknameModal';
 
 export default function Home() {
@@ -16,10 +17,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [pendingAction, setPendingAction] = useState<'create' | 'join' | null>(null);
+  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>([]);
 
   useEffect(() => {
     const saved = getNickname();
     if (saved) setNickname(saved);
+    setRecentRooms(getRecentRooms());
   }, []);
 
   const handleNicknameSet = (nick: string) => {
@@ -44,21 +47,12 @@ export default function Home() {
     const currentNick = nick || nickname;
     setLoading(true);
     setError('');
-
     try {
       const playerId = getOrCreatePlayerId();
-      const roomCode = generateRoomCode();
-
       const { data: room, error: err } = await supabase
         .from('rooms')
-        .insert({
-          title: `${currentNick} 的房间`,
-          room_code: roomCode,
-          host_player_id: playerId,
-        })
-        .select()
-        .single();
-
+        .insert({ title: `${currentNick} 的房间`, room_code: generateRoomCode(), host_player_id: playerId })
+        .select().single();
       if (err) throw err;
       router.push(`/room/${room.id}`);
     } catch {
@@ -69,26 +63,13 @@ export default function Home() {
   };
 
   const joinRoom = async (nick?: string) => {
-    if (!joinCode.trim()) {
-      setError('请输入房间码');
-      return;
-    }
-
+    if (!joinCode.trim()) { setError('请输入房间码'); return; }
     setLoading(true);
     setError('');
-
     try {
       const { data: room, error: err } = await supabase
-        .from('rooms')
-        .select('id')
-        .eq('room_code', joinCode.trim().toUpperCase())
-        .single();
-
-      if (err || !room) {
-        setError('找不到该房间，请检查房间码');
-        return;
-      }
-
+        .from('rooms').select('id').eq('room_code', joinCode.trim().toUpperCase()).single();
+      if (err || !room) { setError('找不到该房间，请检查房间码'); return; }
       router.push(`/room/${room.id}`);
     } catch {
       setError('加入房间失败，请重试');
@@ -97,21 +78,14 @@ export default function Home() {
     }
   };
 
-  const handleCreate = () => {
-    if (!requireNickname('create')) return;
-    createRoom();
-  };
-
-  const handleJoin = () => {
-    if (!requireNickname('join')) return;
-    joinRoom();
-  };
+  const handleCreate = () => { if (requireNickname('create')) createRoom(); };
+  const handleJoin = () => { if (requireNickname('join')) joinRoom(); };
 
   return (
     <>
       {showNicknameModal && <NicknameModal onSubmit={handleNicknameSet} />}
 
-      <main className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-4">
+      <main className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-4 py-12">
         <div className="w-full max-w-sm space-y-8">
           <div className="text-center">
             <h1 className="text-3xl font-bold text-gray-900">Roleplay Writing Room</h1>
@@ -119,12 +93,7 @@ export default function Home() {
             {nickname && (
               <p className="mt-3 text-sm text-gray-400">
                 你好，<span className="font-medium text-gray-600">{nickname}</span>
-                <button
-                  onClick={() => setShowNicknameModal(true)}
-                  className="ml-2 text-xs underline hover:text-gray-600"
-                >
-                  修改
-                </button>
+                <button onClick={() => setShowNicknameModal(true)} className="ml-2 text-xs underline hover:text-gray-600">修改</button>
               </p>
             )}
           </div>
@@ -158,21 +127,12 @@ export default function Home() {
                   className="w-full py-3 px-4 border border-gray-300 rounded-md text-gray-900 placeholder-gray-400 font-mono text-center text-xl tracking-widest focus:outline-none focus:ring-2 focus:ring-gray-900"
                 />
                 <div className="flex gap-2">
-                  <button
-                    onClick={handleJoin}
-                    disabled={loading}
-                    className="flex-1 py-2 px-4 bg-gray-900 text-white font-medium rounded-md hover:bg-gray-700 disabled:opacity-50 transition-colors"
-                  >
+                  <button onClick={handleJoin} disabled={loading}
+                    className="flex-1 py-2 px-4 bg-gray-900 text-white font-medium rounded-md hover:bg-gray-700 disabled:opacity-50 transition-colors">
                     {loading ? '加入中...' : '加入'}
                   </button>
-                  <button
-                    onClick={() => {
-                      setShowJoinInput(false);
-                      setJoinCode('');
-                      setError('');
-                    }}
-                    className="py-2 px-4 border border-gray-300 text-gray-600 rounded-md hover:bg-gray-50 transition-colors"
-                  >
+                  <button onClick={() => { setShowJoinInput(false); setJoinCode(''); setError(''); }}
+                    className="py-2 px-4 border border-gray-300 text-gray-600 rounded-md hover:bg-gray-50 transition-colors">
                     取消
                   </button>
                 </div>
@@ -181,6 +141,25 @@ export default function Home() {
           </div>
 
           {error && <p className="text-center text-sm text-red-600">{error}</p>}
+
+          {/* 最近的房间 */}
+          {recentRooms.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-400 mb-2 font-medium uppercase tracking-wide">最近的房间</p>
+              <div className="space-y-1.5">
+                {recentRooms.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => router.push(`/room/${r.id}`)}
+                    className="w-full flex items-center justify-between py-2 px-3 bg-white border border-gray-200 rounded-md hover:bg-gray-50 transition-colors text-left"
+                  >
+                    <span className="text-sm text-gray-700 truncate">{r.title}</span>
+                    <span className="text-xs font-mono text-gray-400 ml-2 shrink-0">{r.code}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </>

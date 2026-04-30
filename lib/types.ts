@@ -6,6 +6,10 @@ export interface Room {
   room_code: string;
   host_player_id: string;
   current_turn_member_id: string | null;
+  status: 'active' | 'paused';
+  show_typing_preview: boolean;
+  allow_use_others_chars: boolean;
+  free_for_all_mode: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -42,4 +46,11 @@ export interface Post {
   content: string;
   order_index: number;
   created_at: string;
+}
+
+export interface RecentRoom {
+  id: string;
+  code: string;
+  title: string;
+  lastVisited: string;
 }
